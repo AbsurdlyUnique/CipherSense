@@ -2,7 +2,10 @@
 
 ## 1. Objective
 
-The primary objective is to develop a **C++ static library** (`.dylib`/.`a`). This library format facilitates easy integration into various C++ projects, such as tools for analyzing game assets or general file system utilities, without requiring repeated compilation.
+The primary objective is to develop C++ libraries:
+  - static (`.a`)
+  - dynamic (`.dylib`)
+This library format facilitates easy integration into various C++ projects, such as tools for analyzing game assets or general file system utilities, without requiring repeated compilation.
 
 The library's core functionality will be to provide a heuristic assessment of whether a given file is likely encrypted using a strong algorithm like AES. This analysis will be performed solely based on the file's byte-level statistical properties, without access to any decryption keys or prior knowledge of specific file formats. The goal is to offer a preliminary check: does the file content resemble random noise or structured data?
 
@@ -26,13 +29,25 @@ This section details the proposed algorithm for heuristically identifying potent
 
 *   **Procedure:** The analysis proceeds in the following stages:
     1.  **File Ingestion and Byte Frequency Aggregation:**
-        *   The file specified by the input path **would be** opened in binary input mode (`std::ios::binary`). This is crucial to ensure byte integrity, preventing any platform-specific data transformations (e.g., line ending conversions) that could corrupt the byte frequency data essential for subsequent statistical analysis.
-        *   To handle potentially large files without excessive memory allocation, the file **would be** processed sequentially, reading one byte at a time. This streaming approach offers robustness against memory exhaustion.
-        *   Error handling **would be** incorporated. Potential `std::ifstream` exceptions (e.g., file not found, permissions error) or stream state errors during reading **would need** to be caught or checked. The chosen strategy **would likely involve** returning a specific error indicator within the result structure rather than throwing exceptions from the library function itself, simplifying integration for the caller.
-        *   A frequency array, `std::vector<unsigned long long> counts(256, 0)`, **would be** used to store the occurrence count for each possible byte value (0-255). The `unsigned long long` type is selected to prevent potential integer overflows when analyzing large files.
-        *   For each byte `b` read from the file, the corresponding counter `counts[static_cast<unsigned char>(b)]` **would be** incremented.
+        *   The file specified by the input path would be opened in binary input mode (`std::ios::binary`). This is crucial to ensure byte integrity, preventing any platform-specific data transformations (e.g., line ending conversions) that could corrupt the byte frequency data essential for subsequent statistical analysis.
+        *   The initial bytes of the file **would be** read first for the header check. If no known header is found, the process continues by reading the rest of the file sequentially (or a sufficiently large prefix) for frequency counting. This avoids excessive memory allocation for large files.
+        *   Error handling would be incorporated for file I/O operations.
+        *   A frequency array, `std::vector<unsigned long long> counts(256, 0)`, would be used to store the occurrence count for each possible byte value (0-255) *if* the statistical analysis proceeds.
+        *   Byte frequencies **would be** aggregated during the sequential read phase.
 
-    2.  **Statistical Measure Calculation:** Upon successful ingestion of the file (or a predetermined sufficient prefix), the aggregated `counts` data **would be** subjected to the following statistical tests:
+    2.  **Preliminary Header Check (Magic Number Scan):**
+        *   *Rationale:* Before performing computationally more intensive statistical analysis, a quick check of the file's initial bytes against known signatures (magic numbers) for common non-encrypted, potentially high-entropy file types (especially compressed archives and media formats) can efficiently identify many files that are not the target of the encryption detection.
+        *   *Implementation:* The first N bytes of the file (where N is sufficient to cover common signatures, e.g., 8-16 bytes) **would be** compared against a predefined list of known magic numbers. Examples include:
+            *   ZIP: `50 4B 03 04` (`PK..`)
+            *   Gzip: `1F 8B 08`
+            *   Bzip2: `42 5A 68` (`BZh`)
+            *   PNG: `89 50 4E 47 0D 0A 1A 0A` (`.PNG....`)
+            *   JPEG: `FF D8 FF`
+            *   PDF: `25 50 44 46` (`%PDF`)
+            *   (Others as deemed necessary: RAR, 7z, various media formats)
+        *   *Outcome:* If a known signature is matched, the analysis **could** conclude early, potentially returning a specific result like `KNOWN_FILE_TYPE` or `LIKELY_COMPRESSED`, distinct from the results of the statistical tests.
+
+    3.  **Statistical Measure Calculation (Conditional):** If the preliminary header check does not identify a known file type, *then* the aggregated `counts` data **would be** subjected to the following statistical tests:
 
         *   **A) Shannon Entropy Calculation:**
             *   *Theoretical Basis:* Shannon entropy, denoted \( H \), quantifies the average information content or uncertainty associated with a random variable. For a discrete random variable \( X \) with possible outcomes \( x_1, ..., x_k \) and probabilities \( P(x_i) \), the entropy is defined as: \[ H(X) = - \sum_{i=1}^{k} P(x_i) \log_b P(x_i) \] In this context, the random variable represents a byte read from the file, with 256 possible outcomes (byte values 0-255). The probability \( p_i \) of observing byte value \( i \) is estimated from the frequency data as \( p_i = \frac{\text{counts}[i]}{\text{total\_bytes}} \). The base of the logarithm \( b \) is typically chosen as 2, resulting in entropy measured in bits.
@@ -108,7 +123,7 @@ This section details the proposed algorithm for heuristically identifying potent
                 }
                 ```
 
-    3.  **Result Aggregation and Assessment:**
+    4.  **Result Aggregation and Assessment:**
         *   A minimum file size threshold (e.g., 4096 bytes) **would be** enforced. Files smaller than this **would be** deemed unsuitable for reliable statistical analysis, and the result should indicate this.
         *   Based on the calculated entropy and the Chi-squared test outcome, a final assessment **would be** made (e.g., `LIKELY_ENCRYPTED_OR_COMPRESSED` if entropy is high and the Chi-squared test does not reject uniformity; `LIKELY_NOT_ENCRYPTED` otherwise).
         *   The results, including the calculated entropy, the χ² statistic, the total bytes processed, and the final assessment, **would be** packaged into the `FileStats` structure defined in the API header and returned to the caller.
@@ -121,7 +136,9 @@ This section outlines key C++ implementation details for the static library.
 *   **Language Standard:** C++17 is recommended as a minimum baseline for features like `std::filesystem` (if needed for path manipulation, although basic `std::string` handling might suffice) and general modern practices.
 *   **Core Headers:** Essential headers include `<fstream>` (file I/O), `<vector>` (byte counts), `<string>` (file path), `<cmath>` (`log2`), `<numeric>` (`std::accumulate`), `<stdexcept>` (potential error handling), and `<limits>` (for `infinity()` if used).
 *   **API Design (`.h` Header):**
-    *   A clean, minimal header file is essential for a reusable library. It should define the result structure and the primary analysis function signature.
+    *   A clean, minimal header file is essential for a reusable library. **The primary error handling strategy chosen is to return error conditions via the `FileStats::Result` enum**, rather than throwing exceptions. This approach simplifies integration for callers by avoiding mandatory `try-catch` blocks.
+    *   The header should define the result structure and the primary analysis function signature:
+
         ```cpp
         // FileAnalysis.h
         #pragma once
@@ -137,27 +154,25 @@ This section outlines key C++ implementation details for the static library.
                 LIKELY_ENCRYPTED_OR_COMPRESSED,
                 LIKELY_NOT_ENCRYPTED,
                 FILE_TOO_SMALL,
-                ERROR_READING
+                ERROR_READING // Indicates file I/O or other runtime errors
             } assessment = Result::ASSESSMENT_UNKNOWN;
             bool chi_squared_passed = false; // Result of check_chi_squared_uniformity
         };
 
-        // Option 1: Return error states via the struct
+        // Returns FileStats. Check FileStats.assessment for errors or results.
         FileStats analyze_file_randomness(const std::string& file_path);
-
-        // Option 2: Throw exceptions on file errors (alternative design)
-        // FileStats analyze_file_randomness_throwing(const std::string& file_path);
         ```
-    *   **Error Handling Strategy:** A decision is needed on how file I/O errors are communicated. Returning an error code/state within the `FileStats::assessment` enum simplifies usage by avoiding mandatory `try-catch` blocks for the caller. Alternatively, throwing standard exceptions (e.g., `std::runtime_error` or custom exceptions derived from `std::exception`) can provide more detailed error information but requires callers to implement exception handling.
+
+    *   **Error Handling Strategy:** As decided above, file I/O errors (e.g., file not found, permission denied) or other runtime issues during analysis should result in the function returning a `FileStats` object with the `assessment` member set to `Result::ERROR_READING`. Callers should check this member before interpreting other fields like `shannon_entropy` or `chi_squared_statistic`.
 *   **Small File Handling:** A check for minimum file size (e.g., `total_bytes < 4096`) should be implemented early in the analysis function. If the threshold is not met, the function should return immediately with the `Result::FILE_TOO_SMALL` assessment.
-*   **Performance:** The byte-by-byte reading approach prioritizes memory safety and simplicity over absolute maximum throughput. While sufficient for many use cases, if performance profiling indicates this is a bottleneck for very large files, optimizations like reading larger blocks into a buffer could be considered later.
+*   **Performance:** The initial plan utilizes a byte-by-byte reading approach (`std::ifstream::get()`). This prioritizes implementation simplicity and predictable memory usage, which is often suitable for library functions. However, it incurs significant overhead due to the potential for frequent system calls. If performance profiling indicates this method is a bottleneck for large files, **it should be refactored** to use buffered reading. Reading the file in larger chunks (e.g., 4KB, 64KB, or aligned with filesystem block sizes) into a temporary buffer and processing the bytes from that buffer drastically reduces system call frequency and typically yields substantial performance improvements.
 
 ## 5. Limitations
 
 It is important to acknowledge the inherent limitations of this statistical approach:
 
-*   **Encryption vs. Compression:** The method cannot reliably differentiate between strongly encrypted data and effectively compressed data (e.g., `.zip`, `.gz`, `.bz2`), as both tend towards high entropy and uniform byte distributions.
-*   **Cipher Agnosticism:** The detection identifies statistical randomness characteristic of *most* strong modern ciphers, not specifically AES. Other ciphers (e.g., ChaCha20, Twofish) producing pseudo-random output will likely be flagged similarly.
+*   **Encryption vs. Compression:** While the preliminary header check aims to identify common compressed formats, the underlying statistical tests (Entropy, Chi-squared) themselves cannot reliably differentiate between strongly encrypted data and *other* effectively compressed data (e.g., formats without common magic numbers, or custom compression schemes) if the header check fails.
+*   **Cipher Agnosticism:** The detection identifies statistical randomness characteristic of *most* strong modern ciphers, not specifically AES. Other ciphers (e.g., ChaCha20, Twofish) producing pseudo-random output will likely be flagged similarly if they pass the header check.
 *   **Inability to Verify Correctness:** A file passing the randomness checks only suggests the *presence* of encryption or compression, not its *cryptographic soundness*. Weak implementations (e.g., insecure modes like ECB, flawed key generation, improper IV usage) might still produce statistically random output but offer little actual security.
 *   **No Key/Parameter Information:** The analysis provides no information regarding the encryption key, initialization vector (IV), mode of operation, or padding scheme used.
 *   **Threshold Sensitivity:** The specific numerical thresholds used for entropy (e.g., > 7.9) and the Chi-squared critical value (based on α = 0.05) are heuristic. Optimal values may vary depending on the types of files being analyzed and might require empirical tuning based on testing with a representative dataset.
